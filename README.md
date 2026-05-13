@@ -318,6 +318,59 @@ The test suite works by:
 
 
 
+---
+
+## ⚠️ Notes for Repository Owner
+
+The fixes and test suite in this PR were developed and verified on a **Linux host** environment using a mock for Android logging. While all logic-level changes are platform-agnostic, the following areas **require manual verification on a real Android device/emulator** before merging:
+
+### Must Verify on Android
+
+1. **Signal handler coexistence with ART runtime**
+   - DexDumper installs `SIGSEGV`/`SIGBUS` handlers with alternate signal stack
+   - ART (Android Runtime) also installs its own signal handlers
+   - **Action:** Inject `libdexdumper.so` into a test APK and verify the app does not crash or behave unexpectedly. Test on multiple Android versions (8–14).
+
+2. **DEX detection in real ART memory**
+   - The test suite validates DEX detection using **synthetic buffers** in heap memory
+   - Real ART memory regions may contain **compact DEX** or **quickened bytecode** formats
+   - **Action:** Run a full dump cycle on a real app and verify all expected DEX files are extracted. Compare output with known-good DEX files.
+
+3. **File I/O on Android paths**
+   - `get_output_directory_path()` tries directories like `/data/data/...`, `/storage/emulated/0/...`
+   - These paths **cannot be tested on Linux host** — they fail silently with "Failed to create directory" messages
+   - **Action:** Verify dumped files are written correctly to the expected output directory on device.
+
+4. **Threading and stealth techniques**
+   - `pthread_setname_np()`, `prctl()`, and `usleep()` calls may behave differently on Android's Bionic libc vs. glibc
+   - **Action:** Verify `apply_stealth_techniques()` works as expected and does not interfere with app stability.
+
+### Additional Recommendations
+
+5. **End-to-end test**
+   - Create a simple test APK that loads the library and runs a controlled dump
+   - Verify all 74 unit tests conceptually cover the correct behaviors on Android
+
+6. **Test on multiple architectures**
+   - The `%lx` sscanf fix (`memory_scanner.c`) should work on both 32-bit (armeabi-v7a) and 64-bit (arm64-v8a), but verify parsing of `/proc/self/maps` on both
+
+---
+
+### Quick Build & Test on Android
+
+```bash
+# Build for all architectures
+$NDK_HOME/ndk-build NDK_PROJECT_PATH=. NDK_APPLICATION_MK=./jni/Application.mk
+
+# Push to device and test
+adb push libs/arm64-v8a/libdexdumper.so /data/local/tmp/
+```
+
+Or use the provided **GitHub Actions** workflow for automated builds across all architectures.
+
+See the [Build Instructions](#build-instructions) section above for NDK setup details.
+
+
 ## 📄 License
 
 This project is licensed under the **MIT License**. You can view the license details in the [LICENSE](https://github.com/muhammadrizwan87/dexdumper/blob/main/LICENSE) file.
