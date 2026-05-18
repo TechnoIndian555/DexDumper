@@ -77,16 +77,20 @@ int parse_memory_regions(MemoryRegion** regions_array) {
         MemoryRegion* current_region = &(*regions_array)[region_count];
         memset(current_region, 0, sizeof(MemoryRegion));
         
-        // Format: start-end permissions offset dev:dev inode pathname
-        int field_count = sscanf(map_line, "%p-%p %4s %lx %x:%x %lu %255s",
-                           &current_region->start_address, 
-                           &current_region->end_address, 
+        unsigned long start_addr = 0, end_addr = 0;
+        
+        int field_count = sscanf(map_line, "%lx-%lx %4s %lx %x:%x %lu %255s",
+                           &start_addr, 
+                           &end_addr, 
                            current_region->permissions,
                            &current_region->file_offset, 
                            &current_region->device_major, 
                            &current_region->device_minor,
                            &current_region->inode_number, 
                            current_region->path_name);
+        
+        current_region->start_address = (void*)start_addr;
+        current_region->end_address = (void*)end_addr;
 
         // Handle case where pathname is missing
         if (field_count == 7) {

@@ -454,11 +454,14 @@ static void load_runtime_config(void) {
             }
             g_runtime_config.excluded_sha1_count = excluded_count;
             LOGI("Runtime config: loaded %d excluded SHA1 entries", excluded_count);
+        } else {
+            for (int i = 0; i < excluded_count; i++) free(excluded_sha1_temp[i]);
         }
     }
     
     // Store output directory templates in global configuration
     if (output_template_count > 0) {
+        int templates_oom = 0;
         g_runtime_config.output_directory_templates = malloc(output_template_count * sizeof(char*));
         if (g_runtime_config.output_directory_templates) {
             for (int i = 0; i < output_template_count; i++) {
@@ -466,6 +469,18 @@ static void load_runtime_config(void) {
             }
             g_runtime_config.output_directory_count = output_template_count;
             LOGI("Runtime config: loaded %d output directory templates", output_template_count);
+        } else {
+            templates_oom = 1;
+        }
+        if (templates_oom) {
+            for (int i = 0; i < output_template_count; i++) free(output_templates_temp[i]);
+            if (g_runtime_config.excluded_sha1_list) {
+                for (int i = 0; i < g_runtime_config.excluded_sha1_count; i++)
+                    free(g_runtime_config.excluded_sha1_list[i]);
+                free(g_runtime_config.excluded_sha1_list);
+                g_runtime_config.excluded_sha1_list = NULL;
+                g_runtime_config.excluded_sha1_count = 0;
+            }
         }
     }
     

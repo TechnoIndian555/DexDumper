@@ -198,6 +198,8 @@ static void* dumping_thread_function(void* thread_argument) {
     }
     pthread_mutex_unlock(&dump_registry_mutex);
     
+    cleanup_config_manager();
+    
     LOGI("=== DEX DUMPING OPERATION COMPLETED SUCCESSFULLY ===");
     return NULL;
 }

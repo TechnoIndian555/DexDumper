@@ -237,6 +237,140 @@ We welcome contributions! Please see our contributing guidelines:
 
 ---
 
+---
+
+## 🔧 Fixes & Improvements
+
+### 1. DEX Signature Scan Alignment Bug (`src/dex_detector.c`)
+
+**Issue:** The `scan_for_dex_signature()` function used a **4-byte stride** (`current_offset += 4`) when scanning memory for DEX magic signatures. DEX files located at non-4-byte-aligned offsets (1, 2, or 3) were silently skipped, causing false negatives.
+
+**Fix:** Replaced the fixed-stride scan with a **chunk-based byte-by-byte scanning** approach:
+- Memory is read in **64KB chunks** via `read_memory_safely()` (minimizes expensive signal-handler setup to ~32 calls per 2MB scan limit)
+- Each chunk is scanned **byte-by-byte** in a local buffer using `memcmp()` (zero signal-handler overhead)
+- Local offset is converted back to global offset when a match is found
+
+**Result:** DEX files at **any alignment** are now detected. Performance is improved due to fewer `read_memory_safely()` calls vs. the original 4-byte stride approach.
+
+### 2. Memory Leak in Runtime Config Parser (`src/config_manager.c`)
+
+**Issue:** In `load_runtime_config()`, if `malloc()` for `output_directory_templates` succeeded but `malloc()` for `excluded_sha1_list` failed (or vice versa), the already-allocated `strdup()`'d strings and the successful allocation were leaked.
+
+**Fix:** Added proper cleanup in both failure paths:
+- If SHA1 list `malloc()` fails: all `strdup()`'d SHA1 strings are freed
+- If template `malloc()` fails: all `strdup()`'d template strings are freed, AND the previously-allocated SHA1 list (if any) is fully cleaned up
+
+### 3. `cleanup_config_manager()` Never Called (`src/main.c`)
+
+**Issue:** The `init_config_manager()` function was called at startup, but `cleanup_config_manager()` was **never invoked** at shutdown. All runtime config resources (loaded SHA1 exclusion list, output directory templates) leaked for the lifetime of the process.
+
+**Fix:** Added `cleanup_config_manager()` call at the end of `dumping_thread_function()`, before the thread returns.
+
+### 4. Non-Portable `sscanf` Format Specifier (`src/memory_scanner.c`)
+
+**Issue:** The `sscanf()` call for parsing `/proc/self/maps` used `%p` format specifier for memory addresses. Per the C standard, `%p` in `sscanf` has **implementation-defined behavior** and may not work correctly across different Android NDK versions or architectures.
+
+**Fix:** Changed to `%lx` with `unsigned long` temporaries, then explicitly cast to `(void*)`. This is well-defined and portable across all architectures (32-bit and 64-bit).
+
+---
+
+## 🧪 Test Suite
+
+A **host-side test suite** has been added in the `tests/` directory, enabling testing on a standard Linux machine without Android NDK:
+
+```
+tests/
+├── Makefile                    # make -C tests to build + run
+├── test_runner.c               # All 74 test cases
+├── test_framework.h            # Test macros (ASSERT, RUN_TEST, etc.)
+├── stub_main.c                 # Stub for verbose_logging global
+├── mock_android/android/log.h  # Mock Android logging for host compilation
+└── .gitignore
+```
+
+### Build & Run
+
+```bash
+make -C tests
+```
+
+### Coverage (74 tests, 225 assertions)
+
+| Module | Tests | What is Tested |
+|---|---|---|
+| **Signal Handler** | 7 | Install, NULL/low address rejection, heap read, safe read, edge cases |
+| **SHA1** | 9 | Empty, abc, fox, streaming, large data, digest compare, hex conversion |
+| **DEX Detector** | 11 | Valid header, magic bytes, size bounds, endian tag, header size, string table OOB, signature scan, OAT container |
+| **Alignment Regression** | 5 | DEX at offsets 0/1/2/3/4 — verifies byte-level scan correctness |
+| **Memory Scanner** | 14 | Parse /proc/self/maps, potential region detection, region filtering, memory copy |
+| **Registry Manager** | 8 | Inode dedup, SHA1 dedup, SHA1 exclusion, directory-level duplicate detection |
+| **Config Cleanup** | 2 | Double cleanup safety, init/cleanup/reinit cycle |
+| **Pattern Matching** | 13 | Valid patterns (normal, large index, zero ptr), invalid (missing prefix, wrong extension, negative index, etc.) |
+| **Configuration** | 5 | Default values, exclusion list, API initialization, output templates, SHA1 hex validation |
+
+### Architecture
+
+The test suite works by:
+1. Providing a **mock** `android/log.h` that replaces `__android_log_print()` with `fprintf(stderr, ...)`
+2. Compiling the actual project source files (minus `main.c`) alongside the test runner
+3. Using `sigsetjmp`/`longjmp` in test macros for clean assertion failure handling
+4. Creating **temporary directories** and **in-memory DEX structures** for integration-level testing
+
+
+
+---
+
+## ⚠️ Notes for Repository Owner
+
+The fixes and test suite in this PR were developed and verified on a **Linux host** environment using a mock for Android logging. While all logic-level changes are platform-agnostic, the following areas **require manual verification on a real Android device/emulator** before merging:
+
+### Must Verify on Android
+
+1. **Signal handler coexistence with ART runtime**
+   - DexDumper installs `SIGSEGV`/`SIGBUS` handlers with alternate signal stack
+   - ART (Android Runtime) also installs its own signal handlers
+   - **Action:** Inject `libdexdumper.so` into a test APK and verify the app does not crash or behave unexpectedly. Test on multiple Android versions (8–14).
+
+2. **DEX detection in real ART memory**
+   - The test suite validates DEX detection using **synthetic buffers** in heap memory
+   - Real ART memory regions may contain **compact DEX** or **quickened bytecode** formats
+   - **Action:** Run a full dump cycle on a real app and verify all expected DEX files are extracted. Compare output with known-good DEX files.
+
+3. **File I/O on Android paths**
+   - `get_output_directory_path()` tries directories like `/data/data/...`, `/storage/emulated/0/...`
+   - These paths **cannot be tested on Linux host** — they fail silently with "Failed to create directory" messages
+   - **Action:** Verify dumped files are written correctly to the expected output directory on device.
+
+4. **Threading and stealth techniques**
+   - `pthread_setname_np()`, `prctl()`, and `usleep()` calls may behave differently on Android's Bionic libc vs. glibc
+   - **Action:** Verify `apply_stealth_techniques()` works as expected and does not interfere with app stability.
+
+### Additional Recommendations
+
+5. **End-to-end test**
+   - Create a simple test APK that loads the library and runs a controlled dump
+   - Verify all 74 unit tests conceptually cover the correct behaviors on Android
+
+6. **Test on multiple architectures**
+   - The `%lx` sscanf fix (`memory_scanner.c`) should work on both 32-bit (armeabi-v7a) and 64-bit (arm64-v8a), but verify parsing of `/proc/self/maps` on both
+
+---
+
+### Quick Build & Test on Android
+
+```bash
+# Build for all architectures
+$NDK_HOME/ndk-build NDK_PROJECT_PATH=. NDK_APPLICATION_MK=./jni/Application.mk
+
+# Push to device and test
+adb push libs/arm64-v8a/libdexdumper.so /data/local/tmp/
+```
+
+Or use the provided **GitHub Actions** workflow for automated builds across all architectures.
+
+See the [Build Instructions](#build-instructions) section above for NDK setup details.
+
+
 ## 📄 License
 
 This project is licensed under the **MIT License**. You can view the license details in the [LICENSE](https://github.com/muhammadrizwan87/dexdumper/blob/main/LICENSE) file.
